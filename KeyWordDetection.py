@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Keyword Spotter – Keras edition (трійця моделей)
+Keyword Spotter – Keras edition (3 models)
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ def main():
 
     best_model = tf.keras.models.load_model(CKPT_OUT)
     loss, acc = best_model.evaluate(test_ds, verbose=0)
-    print(f"🏁 Test accuracy {acc*100:5.2f}% – модель ({MODEL_TYPE}) збережено → {CKPT_OUT}")
+    print(f"🏁 Test accuracy {acc*100:5.2f}% – model ({MODEL_TYPE}) saved → {CKPT_OUT}")
 
 if __name__ == "__main__":
     main()

@@ -1,60 +1,53 @@
 #!/usr/bin/env python
 """
-Keyword Spotter – Keras edition 🥑 (auto‑val split)
-==================================================
-Your project only has **Train/** and **Test/**; no Validation/. This version
-creates a 10 % hold‑out slice from Train at run‑time, so you don’t need to
-rename folders.
-
-Folder layout it expects now:
+Keyword Spotter – Keras edition (pre‑split Train / Valid / Test)
+=====================================================================
+You already have three explicit splits:
 ```
 PROJECTNR2/
- ├─ Train/
- ├─ Test/
+ ├─ Train/           # training clips
+ ├─ Valid/           # validation clips (same sub‑folder layout)
+ ├─ Test/            # held‑out evaluation
  └─ KeyWordDetection.py
 ```
-Inside each, sub‑folders per word plus optional `_silence_`.
+Each of those contains one folder per word (`yes/`, `no/`, …) plus an optional
+`_silence_/` bucket with background noise. The script loads them directly—no
+random slicing anymore.
 
-Setup / run
------------
-```bash
-pip install tensorflow  # TF‑2.x
-python KeyWordDetection.py
 ```
+pip install tensorflow          # TF 2.x 
+python KeyWordDetection.py      # train & save
+python live_keyword_listener.py # real‑time inference
+```
+Adjust `WORDS` or flip `USE_SILENCE_CLASS` below to match your training set.
 """
 from __future__ import annotations
-import os, random, pathlib
+import random, pathlib, sys
 import tensorflow as tf
 
-# -------------------------------------------------
-# CONFIG 🎛️
-# -------------------------------------------------
+# CONFIG
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
-DATA_ROOT    = PROJECT_ROOT                    # Train/ / Test/ live here
+DATA_ROOT    = PROJECT_ROOT               # Train / Valid / Test live here
 WORDS = [
     "yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go",
 ]
-USE_SILENCE_CLASS = False           # True ⇒ "_silence_" is its own label
-VAL_FRACTION      = 0.1             # portion of Train used for validation
+USE_SILENCE_CLASS = True          # set True if you trained silence explicitly
 
 BATCH_SIZE  = 64
 EPOCHS      = 15
-LR         = 1e-3
+LR          = 1e-3
 SAMPLE_RATE = 16_000
 NUM_MELS    = 40
 CKPT_OUT    = "kws_keras.h5"
 
 random.seed(13)
 
-# -------------------------------------------------
-# Scan a folder → lists of wav paths & labels
-# -------------------------------------------------
-
+# Helper – scan directory -> file list + labels
 def scan_dir(dir_path: pathlib.Path):
     words = [w.lower() for w in WORDS]
     has_sil = USE_SILENCE_CLASS and (dir_path / "_silence_").is_dir()
-    unknown_i = len(words)
-    silence_i = len(words) if not has_sil else len(words) + 1
+    unk_i   = len(words)
+    sil_i   = len(words) if not has_sil else len(words) + 1
 
     paths, labels = [], []
     for folder in dir_path.iterdir():
@@ -62,21 +55,19 @@ def scan_dir(dir_path: pathlib.Path):
             continue
         name = folder.name.lower()
         if has_sil and name == "_silence_":
-            label = silence_i
+            label = sil_i
         elif name in words:
             label = words.index(name)
         else:
-            label = unknown_i
+            label = unk_i
         for wav in folder.glob("*.wav"):
             paths.append(str(wav))
             labels.append(label)
 
-    num_classes = len(WORDS) + 1 + int(has_sil)
-    return paths, labels, num_classes
+    n_classes = len(WORDS) + 1 + int(has_sil)
+    return paths, labels, n_classes
 
-# -------------------------------------------------
-# Audio → log‑Mel helper
-# -------------------------------------------------
+# Audio -> log‑Mel (tf ops)
 mel_weight_matrix = tf.signal.linear_to_mel_weight_matrix(
     num_mel_bins=NUM_MELS,
     num_spectrogram_bins=129,
@@ -89,24 +80,24 @@ def wav_to_logmel(path: tf.Tensor):
     audio_bin = tf.io.read_file(path)
     wav, _ = tf.audio.decode_wav(audio_bin, desired_channels=1)
     wav = tf.squeeze(wav, -1)
+
     wav_len = tf.shape(wav)[0]
     wav = tf.cond(
         wav_len < SAMPLE_RATE,
         lambda: tf.pad(wav, [[0, SAMPLE_RATE - wav_len]]),
         lambda: wav[:SAMPLE_RATE],
     )
+
     stft = tf.signal.stft(wav, frame_length=256, frame_step=128, fft_length=256)
     spec = tf.abs(stft)
-    mel = tf.tensordot(spec, mel_weight_matrix, 1)
+    mel  = tf.tensordot(spec, mel_weight_matrix, 1)
     mel.set_shape(spec.shape[:-1].concatenate([NUM_MELS]))
     log_mel = tf.math.log(mel + 1e-6)
     return log_mel
 
-# -------------------------------------------------
-# Dataset builders
-# -------------------------------------------------
+# Dataset builder
 
-def make_tf_dataset(paths, labels, batch, shuffle):
+def make_ds(paths, labels, batch, shuffle):
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
     if shuffle:
         ds = ds.shuffle(len(paths), seed=13)
@@ -115,13 +106,11 @@ def make_tf_dataset(paths, labels, batch, shuffle):
     ds = ds.batch(batch).prefetch(tf.data.AUTOTUNE)
     return ds
 
-# -------------------------------------------------
-# Model – tiny CNN
-# -------------------------------------------------
+# Model
 
-def make_model(num_classes, input_shape):
+def make_model(n_classes, frame_dim):
     return tf.keras.Sequential([
-        tf.keras.layers.Input(shape=input_shape),
+        tf.keras.layers.Input(shape=(frame_dim, NUM_MELS, 1)),
         tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
         tf.keras.layers.BatchNormalization(),
         tf.keras.layers.MaxPool2D(),
@@ -131,54 +120,46 @@ def make_model(num_classes, input_shape):
         tf.keras.layers.Conv2D(128, 3, padding="same", activation="relu"),
         tf.keras.layers.BatchNormalization(),
         tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dense(num_classes, activation="softmax"),
+        tf.keras.layers.Dense(n_classes, activation="softmax"),
     ])
 
-# -------------------------------------------------
-# Main
-# -------------------------------------------------
+# Training script
 
 def main():
     train_root = DATA_ROOT / "Train"
+    valid_root = DATA_ROOT / "Valid"
     test_root  = DATA_ROOT / "Test"
-    if not train_root.is_dir() or not test_root.is_dir():
-        raise SystemExit("Expecting Train/ and Test/ folders next to the script.")
+
+    missing = [p for p in (train_root, valid_root, test_root) if not p.is_dir()]
+    if missing:
+        print("Missing folders:", *missing, sep="\n - ")
+        sys.exit(1)
 
     train_paths, train_labels, n_classes = scan_dir(train_root)
+    val_paths,   val_labels,   _        = scan_dir(valid_root)
     test_paths,  test_labels,  _        = scan_dir(test_root)
 
-    # === manual train/val split ===
-    combined = list(zip(train_paths, train_labels))
-    random.shuffle(combined)
-    val_size = int(len(combined) * VAL_FRACTION)
-    val_combo = combined[:val_size]
-    train_combo = combined[val_size:]
+    train_ds = make_ds(train_paths, train_labels, BATCH_SIZE, shuffle=True)
+    val_ds   = make_ds(val_paths,   val_labels,   BATCH_SIZE, shuffle=False)
+    test_ds  = make_ds(test_paths,  test_labels,  BATCH_SIZE, shuffle=False)
 
-    t_paths, t_labels = zip(*train_combo)
-    v_paths, v_labels = zip(*val_combo) if val_combo else ([], [])
-
-    train_ds = make_tf_dataset(list(t_paths), list(t_labels), BATCH_SIZE, shuffle=True)
-    val_ds   = make_tf_dataset(list(v_paths), list(v_labels), BATCH_SIZE, shuffle=False) if v_paths else None
-    test_ds  = make_tf_dataset(test_paths,  test_labels,  BATCH_SIZE, shuffle=False)
-
-    # Snag frame dimension from one batch
+    # Inspect first batch to lock frame dimension
     for xs, _ in train_ds.take(1):
         frames = xs.shape[1]
-    model = make_model(n_classes, (frames, NUM_MELS, 1))
+    model = make_model(n_classes, frames)
     model.compile(optimizer=tf.keras.optimizers.Adam(LR),
                   loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+
     print(model.summary())
 
-    callbacks = [tf.keras.callbacks.ModelCheckpoint(CKPT_OUT, save_best_only=True,
-                                                    monitor="val_accuracy" if val_ds else "accuracy",
-                                                    save_weights_only=False)]
+    ckpt_cb = tf.keras.callbacks.ModelCheckpoint(
+        CKPT_OUT, save_best_only=True, monitor="val_accuracy", save_weights_only=False)
 
-    model.fit(train_ds, epochs=EPOCHS, validation_data=val_ds, callbacks=callbacks)
+    model.fit(train_ds, epochs=EPOCHS, validation_data=val_ds, callbacks=[ckpt_cb])
 
     best_model = tf.keras.models.load_model(CKPT_OUT)
     loss, acc = best_model.evaluate(test_ds, verbose=0)
     print(f"🏁 Test accuracy {acc*100:5.2f}% – model saved → {CKPT_OUT}")
 
 
-if __name__ == "__main__":
-    main()
+main()

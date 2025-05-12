@@ -1,3 +1,114 @@
+# Keyword Spotter
+
+Tiny (but mighty) speech‑command recogniser built with **TensorFlow 2 / Keras**.
+Trains on Google’s Speech‑Commands‑style folder layout and can do real‑time
+listening from your mic.
+
+---
+
+## 📂 Folder layout expected
+
+```
+PROJECTNR2/
+│
+├─ Train/          # training audio
+├─ Valid/          # validation audio
+├─ Test/           # final hold‑out
+│   └─ _silence_/  # (optional) background noise clips
+│
+├─ KeyWordDetection.py   # training script
+└─ live_keyword_listener.py   # live inference helper
+```
+
+Inside **Train/ Valid/ Test/** each keyword gets its own sub‑folder full of
+16 kHz mono WAV files, e.g.
+
+Anything **not** listed in the `WORDS` array of the script is bucketed into an
+`unknown` class at train‑time.
+
+> \*\*Tip \*\*: If you stick a `_silence_` folder in any split and flip
+> `USE_SILENCE_CLASS = True`, the model learns a dedicated “silence” label
+> instead of treating those clips as generic unknown noise.
+
+---
+
+## 🚀 Quick startmarkdown
+
+```bash
+# 1. Install deps (CPU build of TF by default)
+pip install tensorflow sounddevice
+
+# 2. Train (writes kws_keras.h5 on best val‑accuracy)
+python KeyWordDetection.py
+
+# 3. Talk to it in real time 🤘
+python live_keyword_listener.py
+```
+
+Both scripts are standalone—no extra CLI flags needed. Key config knobs live at
+the top of **KeyWordDetection.py**:
+
+| Var                        | What it does                      |
+| -------------------------- | --------------------------------- |
+| `WORDS`                    | list of target keywords           |
+| `USE_SILENCE_CLASS`        | train an explicit "silence" label |
+| `BATCH_SIZE` `EPOCHS` `LR` | obvious training hyper‑params     |
+
+---
+
+## 🏗️  What’s inside the code?
+
+### KeyWordDetection.py
+
+* **Dataset** – tf.data pipeline that loads WAV → STFT → 40‑bin log‑Mel spec.
+* **Model** – 3‑layer Conv2D → global‑avg‑pool → softmax; \~40 k params.
+* **Training** – Adam, cross‑entropy, best checkpoint saved via callback.
+
+### live\_keyword\_listener.py
+
+* Opens your default mic via **sounddevice**.
+* Captures 1‑second chunks, runs the same preprocessing, feeds the saved model.
+* Prints any keyword whose predicted prob ≥ `THRESH` (0.75 by default).
+
+---
+
+## 🛠️  Customisation
+
+* **Different keywords** – just edit the `WORDS` list and make sure matching
+  folders exist under each split.
+* **Augment data** – easiest place is the `tf.data.Dataset.map` section: add
+  random time‑masking, volume perturb, etc.
+* **Model tweaks** – swap the CNN in `make_model()` for a depthwise separable
+  Conv or an EfficientNet‑lite if you need more juice.
+* **Sampling rate** – dataset must match `SAMPLE_RATE` (16 000). Change that
+  constant plus the padding logic if you’re using a different SR.
+
+---
+
+## 💡 Troubleshooting
+
+| Problem                        | Fix                                                                                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `Missing folders` error        | Check that *Train/ Valid/ Test/* are spelled exactly like that (case‑sensitive) and sit next to the scripts.     |
+| Model prints very low accuracy | Verify `WORDS` matches your folder names; unknown clips might dominate otherwise.                                |
+| Mic not found on Linux         | Pass `device=` arg to `sd.rec()` in *live\_keyword\_listener.py* or run `python -m sounddevice` to list devices. |
+
+---
+
+## 📜 License
+
+MIT – do whatever
+
+---
+
+### Credits
+
+* Dataset concept: Google Speech Commands (© Google, Apache 2.0)
+* Code written with a hefty assist from ChatGPT o3 😎
+
+
+Dataset README
+
 # Speech Commands Data Set v0.02
 
 This is a set of one-second .wav audio files, each containing a single spoken

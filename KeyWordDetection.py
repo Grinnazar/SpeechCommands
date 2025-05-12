@@ -1,37 +1,19 @@
 #!/usr/bin/env python
 """
-Keyword Spotter – Keras edition (pre‑split Train / Valid / Test)
-=====================================================================
-You already have three explicit splits:
-```
-PROJECTNR2/
- ├─ Train/           # training clips
- ├─ Valid/           # validation clips (same sub‑folder layout)
- ├─ Test/            # held‑out evaluation
- └─ KeyWordDetection.py
-```
-Each of those contains one folder per word (`yes/`, `no/`, …) plus an optional
-`_silence_/` bucket with background noise. The script loads them directly—no
-random slicing anymore.
-
-```
-pip install tensorflow          # TF 2.x 
-python KeyWordDetection.py      # train & save
-python live_keyword_listener.py # real‑time inference
-```
-Adjust `WORDS` or flip `USE_SILENCE_CLASS` below to match your training set.
+Keyword Spotter – Keras edition (трійця моделей)
 """
+
 from __future__ import annotations
 import random, pathlib, sys
 import tensorflow as tf
 
-# CONFIG
+# === CONFIG ===
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
-DATA_ROOT    = PROJECT_ROOT               # Train / Valid / Test live here
+DATA_ROOT    = PROJECT_ROOT
 WORDS = [
     "yes", "no", "up", "down", "left", "right", "on", "off", "stop", "go",
 ]
-USE_SILENCE_CLASS = True          # set True if you trained silence explicitly
+USE_SILENCE_CLASS = True
 
 BATCH_SIZE  = 64
 EPOCHS      = 15
@@ -39,10 +21,11 @@ LR          = 1e-3
 SAMPLE_RATE = 16_000
 NUM_MELS    = 40
 CKPT_OUT    = "kws_keras.h5"
+MODEL_TYPE  = "medium"  # "tiny", "medium", "heavy"
 
 random.seed(13)
 
-# Helper – scan directory -> file list + labels
+# === DATA LOADER ===
 def scan_dir(dir_path: pathlib.Path):
     words = [w.lower() for w in WORDS]
     has_sil = USE_SILENCE_CLASS and (dir_path / "_silence_").is_dir()
@@ -67,7 +50,7 @@ def scan_dir(dir_path: pathlib.Path):
     n_classes = len(WORDS) + 1 + int(has_sil)
     return paths, labels, n_classes
 
-# Audio -> log‑Mel (tf ops)
+# === AUDIO TO MEL ===
 mel_weight_matrix = tf.signal.linear_to_mel_weight_matrix(
     num_mel_bins=NUM_MELS,
     num_spectrogram_bins=129,
@@ -95,8 +78,7 @@ def wav_to_logmel(path: tf.Tensor):
     log_mel = tf.math.log(mel + 1e-6)
     return log_mel
 
-# Dataset builder
-
+# === DATASET CREATOR ===
 def make_ds(paths, labels, batch, shuffle):
     ds = tf.data.Dataset.from_tensor_slices((paths, labels))
     if shuffle:
@@ -106,9 +88,18 @@ def make_ds(paths, labels, batch, shuffle):
     ds = ds.batch(batch).prefetch(tf.data.AUTOTUNE)
     return ds
 
-# Model
+# === MODELS ===
+def make_model_tiny(n_classes, frame_dim):
+    return tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(frame_dim, NUM_MELS, 1)),
+        tf.keras.layers.Conv2D(8, 3, padding="same", activation="relu"),
+        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(16, 3, padding="same", activation="relu"),
+        tf.keras.layers.GlobalAveragePooling2D(),
+        tf.keras.layers.Dense(n_classes, activation="softmax"),
+    ])
 
-def make_model(n_classes, frame_dim):
+def make_model_medium(n_classes, frame_dim):
     return tf.keras.Sequential([
         tf.keras.layers.Input(shape=(frame_dim, NUM_MELS, 1)),
         tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu"),
@@ -120,11 +111,38 @@ def make_model(n_classes, frame_dim):
         tf.keras.layers.Conv2D(128, 3, padding="same", activation="relu"),
         tf.keras.layers.BatchNormalization(),
         tf.keras.layers.GlobalAveragePooling2D(),
+        tf.keras.layers.Dropout(0.3),
         tf.keras.layers.Dense(n_classes, activation="softmax"),
     ])
 
-# Training script
+def make_model_heavy(n_classes, frame_dim):
+    return tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(frame_dim, NUM_MELS, 1)),
+        tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu"),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(128, 3, padding="same", activation="relu"),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPool2D(),
+        tf.keras.layers.Conv2D(256, 3, padding="same", activation="relu"),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.GlobalAveragePooling2D(),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(128, activation="relu"),
+        tf.keras.layers.Dense(n_classes, activation="softmax"),
+    ])
 
+def get_model(type: str, n_classes: int, frame_dim: int):
+    if type == "tiny":
+        return make_model_tiny(n_classes, frame_dim)
+    elif type == "medium":
+        return make_model_medium(n_classes, frame_dim)
+    elif type == "heavy":
+        return make_model_heavy(n_classes, frame_dim)
+    else:
+        raise ValueError(f"Invalid model type: {type}")
+
+# === MAIN ===
 def main():
     train_root = DATA_ROOT / "Train"
     valid_root = DATA_ROOT / "Valid"
@@ -143,10 +161,10 @@ def main():
     val_ds   = make_ds(val_paths,   val_labels,   BATCH_SIZE, shuffle=False)
     test_ds  = make_ds(test_paths,  test_labels,  BATCH_SIZE, shuffle=False)
 
-    # Inspect first batch to lock frame dimension
     for xs, _ in train_ds.take(1):
         frames = xs.shape[1]
-    model = make_model(n_classes, frames)
+
+    model = get_model(MODEL_TYPE, n_classes, frames)
     model.compile(optimizer=tf.keras.optimizers.Adam(LR),
                   loss="sparse_categorical_crossentropy", metrics=["accuracy"])
 
@@ -159,7 +177,7 @@ def main():
 
     best_model = tf.keras.models.load_model(CKPT_OUT)
     loss, acc = best_model.evaluate(test_ds, verbose=0)
-    print(f"🏁 Test accuracy {acc*100:5.2f}% – model saved → {CKPT_OUT}")
+    print(f"🏁 Test accuracy {acc*100:5.2f}% – модель ({MODEL_TYPE}) збережено → {CKPT_OUT}")
 
-
-main()
+if __name__ == "__main__":
+    main()

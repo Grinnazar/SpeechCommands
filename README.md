@@ -1,3 +1,19 @@
+# How to use it?
+# 🎙️ Voice-Controlled Desktop for Linux
+
+Say words. Control your system. Like magic (but nerdier).
+
+This tool listens to your voice and does cool desktop stuff based on simple words like:
+
+- **"on" → "cat"** → opens a random cat GIF 🐱  
+- **"stop" → "yes"** → closes the currently focused window  
+- **"left" / "right"** → switches virtual desktops  
+- **"up" / "down"** → Alt‑Tab through windows  
+- **"home"** → minimizes all windows (like "show desktop")  
+- **"marvin"** → Marvin from Hitchhiker's Guide throws you some existential shade 😒  
+
+---
+
 # Keyword Spotter
 
 Tiny (but mighty) speech‑command recogniser built with **TensorFlow 2 / Keras**.
@@ -38,7 +54,7 @@ Anything **not** listed in the `WORDS` array of the script is bucketed into an
 # 1. Install deps (CPU build of TF by default)
 pip install tensorflow sounddevice
 
-# 2. Train (writes kws_keras.h5 on best val‑accuracy)
+# 2. Train
 python KeyWordDetection.py
 
 # 3. Talk to it in real time 🤘
@@ -61,14 +77,14 @@ the top of **KeyWordDetection.py**:
 ### KeyWordDetection.py
 
 * **Dataset** – tf.data pipeline that loads WAV → STFT → 40‑bin log‑Mel spec.
-* **Model** – 3‑layer Conv2D → global‑avg‑pool → softmax; \~40 k params.
+* **Model** – 3‑models for different computational power purposes.
 * **Training** – Adam, cross‑entropy, best checkpoint saved via callback.
 
 ### live\_keyword\_listener.py
 
 * Opens your default mic via **sounddevice**.
 * Captures 1‑second chunks, runs the same preprocessing, feeds the saved model.
-* Prints any keyword whose predicted prob ≥ `THRESH` (0.75 by default).
+* Prints any keyword whose predicted prob ≥ `THRESH`
 
 ---
 
